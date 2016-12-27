@@ -132,6 +132,9 @@ mkdir -p "ffmpeg-${VERSION}"
 cd "ffmpeg-${VERSION}" || exit 2
 tar --strip-components=1 -xf $MYDIR/${ARCHIVE}
 
+echo ######################## autobuild: patching ffmpeg ######################
+patch -p1 < ../pfcd_hevc_optimisations.patch
+
 CFLAGS="$CFLAGS" CXXFLAGS="$CXXFLAGS" LDFLAGS="$LDFLAGS" \
 ./configure --prefix=$FFMPEG_PREFIX \
 	--extra-version="kodi-${VERSION}" \
@@ -164,6 +167,7 @@ CFLAGS="$CFLAGS" CXXFLAGS="$CXXFLAGS" LDFLAGS="$LDFLAGS" \
 	--enable-libdav1d \
 	--disable-mipsdsp \
 	--disable-mipsdspr2 \
+	--enable-rpi \
         ${FLAGS}
 
 make -j ${BUILDTHREADS}

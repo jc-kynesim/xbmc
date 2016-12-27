@@ -277,7 +277,10 @@ if(NOT FFMPEG_FOUND)
                                     <SOURCE_DIR> &&
                                     ${CMAKE_COMMAND} -E copy
                                     ${CMAKE_SOURCE_DIR}/tools/depends/target/ffmpeg/FindGnuTls.cmake
-                                    <SOURCE_DIR>)
+                                    <SOURCE_DIR> &&
+                                    echo ##################### cmake: patching ffmpeg ######################
+                                    patch -p1 < ${CMAKE_SOURCE_DIR}/tools/depends/target/ffmpeg/pfcd_hevc_optimisations.patch
+                     )
 
   if (ENABLE_INTERNAL_DAV1D)
     add_dependencies(ffmpeg dav1d)
