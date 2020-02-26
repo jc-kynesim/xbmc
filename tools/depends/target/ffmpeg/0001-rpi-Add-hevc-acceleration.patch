@@ -364,7 +364,7 @@ index f5ca18aa64..1c4e0d4ef4 100644
  
  /* Add all the streams from the given input file to the global
 diff --git a/libavcodec/Makefile b/libavcodec/Makefile
-index 3cd73fbcc6..15566ccfd1 100644
+index 3cd73fbcc6..3a0f1dbc25 100644
 --- a/libavcodec/Makefile
 +++ b/libavcodec/Makefile
 @@ -6,6 +6,7 @@ HEADERS = ac3_parser.h                                                  \
@@ -387,7 +387,7 @@ index 3cd73fbcc6..15566ccfd1 100644
  OBJS-$(CONFIG_VP56DSP)                 += vp56dsp.o
  OBJS-$(CONFIG_VP8DSP)                  += vp8dsp.o
  OBJS-$(CONFIG_V4L2_M2M)                += v4l2_m2m.o v4l2_context.o v4l2_buffers.o v4l2_fmt.o
-+OBJS-$(CONFIG_V4L2_REQUEST)            += v4l2_request.o
++OBJS-$(CONFIG_V4L2_REQUEST)            += v4l2_request.o v4l2_phase.o
  OBJS-$(CONFIG_WMA_FREQS)               += wma_freqs.o
  OBJS-$(CONFIG_WMV2DSP)                 += wmv2dsp.o
  
@@ -15956,7 +15956,7 @@ index 0000000000..13698d3f33
 +
 +#endif
 diff --git a/libavcodec/hevcdec.c b/libavcodec/hevcdec.c
-index 8f1c162ace..da73c2158f 100644
+index 8f1c162ace..072b7c103d 100644
 --- a/libavcodec/hevcdec.c
 +++ b/libavcodec/hevcdec.c
 @@ -373,14 +373,20 @@ static enum AVPixelFormat get_format(HEVCContext *s, const HEVCSPS *sps)
@@ -16006,18 +16006,22 @@ index 8f1c162ace..da73c2158f 100644
  #endif
          break;
      case AV_PIX_FMT_YUV444P:
-@@ -3091,6 +3106,10 @@ static int decode_nal_units(HEVCContext *s, const uint8_t *buf, int length)
-     }
- 
- fail:
-+    if (ret < 0 && s->avctx->hwaccel && s->avctx->hwaccel->abort_frame) {
-+        s->avctx->hwaccel->abort_frame(s->avctx);
-+    }
+@@ -3220,7 +3235,14 @@ static int hevc_decode_frame(AVCodecContext *avctx, void *data, int *got_output,
+     s->ref = NULL;
+     ret    = decode_nal_units(s, avpkt->data, avpkt->size);
+     if (ret < 0)
++    {
++        // Ensure that hwaccel knows this frame is over
++        if (s->avctx->hwaccel && s->avctx->hwaccel->abort_frame) {
++            s->avctx->hwaccel->abort_frame(s->avctx);
++        }
 +
-     if (s->ref && s->threads_type == FF_THREAD_FRAME)
-         ff_thread_report_progress(&s->ref->tf, INT_MAX, 0);
+         return ret;
++    }
  
-@@ -3592,6 +3611,15 @@ AVCodec ff_hevc_decoder = {
+     if (avctx->hwaccel) {
+         if (s->ref && (ret = avctx->hwaccel->end_frame(avctx)) < 0) {
+@@ -3592,6 +3614,15 @@ AVCodec ff_hevc_decoder = {
  #endif
  #if CONFIG_HEVC_VIDEOTOOLBOX_HWACCEL
                                 HWACCEL_VIDEOTOOLBOX(hevc),
@@ -47270,12 +47274,201 @@ index d0601f0e2f..df46d4af46 100644
  M2MDEC(h264,  "H.264", AV_CODEC_ID_H264,       "h264_mp4toannexb");
  M2MDEC(hevc,  "HEVC",  AV_CODEC_ID_HEVC,       "hevc_mp4toannexb");
  M2MDEC(mpeg1, "MPEG1", AV_CODEC_ID_MPEG1VIDEO, NULL);
+diff --git a/libavcodec/v4l2_phase.c b/libavcodec/v4l2_phase.c
+new file mode 100644
+index 0000000000..0a7f6abd33
+--- /dev/null
++++ b/libavcodec/v4l2_phase.c
+@@ -0,0 +1,140 @@
++// v4l2_phase.c
++
++#include <stdio.h>
++#include <semaphore.h>
++#include <pthread.h>
++
++#include "libavutil/log.h"
++#include "v4l2_phase.h"
++
++typedef struct phase_envss {
++    unsigned int last_order;
++    pthread_mutex_t lock;
++    pthread_cond_t cond;
++} phase_env;
++
++struct V4L2PhaseControl {
++    unsigned int order;
++    unsigned int phase_count;
++    phase_env p[V4L2PHASE_PHASE_COUNT];
++};
++
++
++unsigned int ff_v4l2_phase_order_next(V4L2PhaseControl * const pc)
++{
++    return ++pc->order;
++}
++
++// Phase isn't required but it acts as a check that we know what we are doing
++int
++ff_v4l2_phase_claim(V4L2PhaseInfo * const pi, unsigned int phase)
++{
++    V4L2PhaseControl *const pc = pi->ctrl;
++    phase_env * const p = pc->p + phase;
++
++    if (pi->n2 != phase * 2) {
++        av_log(NULL, AV_LOG_ERROR, "%s: Unexpected phase: req=%d, cur=%d/%d\n", __func__, phase, pi->n2 >> 1, pi->n2 & 1);
++        return -1;
++    }
++
++    pthread_mutex_lock(&p->lock);
++
++    while (pi->order != p->last_order + 1) {
++        pthread_cond_wait(&p->cond, &p->lock);
++    }
++
++    pi->n2++;
++    pthread_mutex_unlock(&p->lock);
++    return 0;
++}
++
++int
++ff_v4l2_phase_release(V4L2PhaseInfo * const pi, unsigned int phase)
++{
++    V4L2PhaseControl *const pc = pi->ctrl;
++    phase_env * const p = pc->p + phase;
++
++    if (pi->n2 != ((phase << 1) | 1)) {
++        av_log(NULL, AV_LOG_ERROR, "%s: Unexpected phase: req=%d, cur=%d/%d\n", __func__, phase, pi->n2 >> 1, pi->n2 & 1);
++        return -1;
++    }
++
++    if (pi->order != p->last_order + 1) {
++        av_log(NULL, AV_LOG_ERROR, "%s: order_mismatch\n", __func__);
++        return -1;
++    }
++
++    pthread_mutex_lock(&p->lock);
++    p->last_order = pi->order;
++    pi->n2++;
++    pthread_cond_broadcast(&p->cond);
++    pthread_mutex_unlock(&p->lock);
++    return 0;
++}
++
++// Init the PhaseInfo, assign a new order, claim phase 0
++int
++ff_v4l2_phase_start(V4L2PhaseInfo * const pi, V4L2PhaseControl * const pc)
++{
++    pi->n2 = 0;
++    pi->ctrl = pc;
++    pi->order = ff_v4l2_phase_order_next(pc);
++    return ff_v4l2_phase_claim(pi, 0);
++}
++
++// Release any claimed phase and claim+release all remaining phases
++void ff_v4l2_phase_abort(V4L2PhaseInfo * const pi)
++{
++    V4L2PhaseControl *const pc = pi->ctrl;
++
++    // Nothing to do
++    if (pi->n2 == 0 || pi->n2 >= pc->phase_count * 2)
++        return;
++
++    // Run through all remaining phases
++    do {
++        if ((pi->n2 & 1) == 0)
++            ff_v4l2_phase_claim(pi, pi->n2 >> 1);
++        else
++            ff_v4l2_phase_release(pi, pi->n2 >> 1);
++    } while (pi->n2 < pc->phase_count * 2);
++}
++
++
++V4L2PhaseControl *
++ff_v4l2_phase_control_new(unsigned int phase_count)
++{
++    V4L2PhaseControl * pc;
++    unsigned int i;
++    if (phase_count > V4L2PHASE_PHASE_COUNT)
++        return NULL;
++    if ((pc = av_mallocz(sizeof(*pc))) == NULL)
++        return NULL;
++    pc->phase_count = phase_count;
++    for (i = 0; i != phase_count; ++i) {
++        phase_env * const p = pc->p + i;
++        p->last_order = 0;
++        pthread_mutex_init(&p->lock, NULL);
++        pthread_cond_init(&p->cond, NULL);
++    }
++    return pc;
++}
++
++void
++ff_v4l2_phase_control_deletez(V4L2PhaseControl ** const ppc)
++{
++    V4L2PhaseControl * const pc = *ppc;
++    unsigned int i;
++
++    if (pc == NULL)
++        return;
++    *ppc = NULL;
++
++    for (i = 0; i != pc->phase_count; ++i) {
++        phase_env * const p = pc->p + i;
++        pthread_mutex_destroy(&p->lock);
++        pthread_cond_destroy(&p->cond);
++    }
++}
++
++
+diff --git a/libavcodec/v4l2_phase.h b/libavcodec/v4l2_phase.h
+new file mode 100644
+index 0000000000..392f22b988
+--- /dev/null
++++ b/libavcodec/v4l2_phase.h
+@@ -0,0 +1,37 @@
++// v4l2_phase.h
++#ifndef AVCODEC_V4L2_PHASE_H
++#define AVCODEC_V4L2_PHASE_H
++
++#define V4L2PHASE_PHASE_COUNT 2
++
++struct V4L2PhaseControl;
++typedef struct V4L2PhaseControl V4L2PhaseControl;
++
++typedef struct V4L2PhaseInfo {
++    unsigned int n2;  // (phase << 1) | (claimed)
++    unsigned int order;
++    V4L2PhaseControl * ctrl;
++} V4L2PhaseInfo;
++
++unsigned int ff_v4l2_phase_order_next(V4L2PhaseControl * const pc);
++
++static inline int ff_v4l2_phase_started(const V4L2PhaseInfo * const pi)
++{
++    return pi->n2 != 0;
++}
++
++// Init the PhaseInfo, assign a new order, claim phase 0
++int ff_v4l2_phase_start(V4L2PhaseInfo * const pi, V4L2PhaseControl * const pc);
++
++// Phase isn't required but it acts as a check that we know what we are doing
++int ff_v4l2_phase_claim(V4L2PhaseInfo * const pi, unsigned int phase);
++int ff_v4l2_phase_release(V4L2PhaseInfo * const pi, unsigned int phase);
++
++// Release any claimed phase and claim+release all remaining phases
++void ff_v4l2_phase_abort(V4L2PhaseInfo * const pi);
++
++
++V4L2PhaseControl * ff_v4l2_phase_control_new(unsigned int phase_count);
++void ff_v4l2_phase_control_deletez(V4L2PhaseControl ** const ppc);
++
++#endif
 diff --git a/libavcodec/v4l2_request.c b/libavcodec/v4l2_request.c
 new file mode 100644
-index 0000000000..0c21860ba7
+index 0000000000..6e49b8ac81
 --- /dev/null
 +++ b/libavcodec/v4l2_request.c
-@@ -0,0 +1,1002 @@
+@@ -0,0 +1,1028 @@
 +/*
 + * This file is part of FFmpeg.
 + *
@@ -47307,11 +47500,26 @@ index 0000000000..0c21860ba7
 +#include "decode.h"
 +#include "internal.h"
 +#include "v4l2_request.h"
++#include "v4l2_phase.h"
 +
 +uint64_t ff_v4l2_request_get_capture_timestamp(AVFrame *frame)
 +{
 +    V4L2RequestDescriptor *req = (V4L2RequestDescriptor*)frame->data[0];
 +    return req ? v4l2_timeval_to_ns(&req->capture.buffer.timestamp) : 0;
++}
++
++int ff_v4l2_request_start_phase_control(AVFrame *frame, struct V4L2PhaseControl * ctrl)
++{
++    V4L2RequestDescriptor * const req = (V4L2RequestDescriptor*)frame->data[0];
++    return ff_v4l2_phase_start(&req->phase, ctrl);
++}
++
++void ff_v4l2_request_abort_phase_control(AVFrame *frame)
++{
++    if (frame != NULL && frame->data[0] != NULL) {
++        V4L2RequestDescriptor *const req = (V4L2RequestDescriptor *)frame->data[0];
++        ff_v4l2_phase_abort(&req->phase);
++    }
 +}
 +
 +int ff_v4l2_request_reset_frame(AVCodecContext *avctx, AVFrame *frame)
@@ -47556,8 +47764,24 @@ index 0000000000..0c21860ba7
 +        return -1;
 +    }
 +
++    ret = ioctl(req->request_fd, MEDIA_REQUEST_IOC_REINIT, NULL);
++    if (ret < 0) {
++        av_log(avctx, AV_LOG_ERROR, "%s: reinit request %d failed, %s (%d)\n", __func__, req->request_fd, strerror(errno), errno);
++        return -1;
++    }
++
 +    if (last_slice) {
++        if (ff_v4l2_phase_started(&req->phase)) {
++            ff_v4l2_phase_release(&req->phase, 0);
++            ff_v4l2_phase_claim(&req->phase, 1);
++        }
++
 +        ret = v4l2_request_dequeue_buffer(ctx, &req->capture);
++
++        if (ff_v4l2_phase_started(&req->phase)) {
++            ff_v4l2_phase_release(&req->phase, 1);
++        }
++
 +        if (ret < 0) {
 +            av_log(avctx, AV_LOG_ERROR, "%s: dequeue capture buffer %d failed for request %d, %s (%d)\n", __func__, req->capture.index, req->request_fd, strerror(errno), errno);
 +            return -1;
@@ -47566,12 +47790,6 @@ index 0000000000..0c21860ba7
 +
 +    // TODO: check errors
 +    // buffer.flags & V4L2_BUF_FLAG_ERROR
-+
-+    ret = ioctl(req->request_fd, MEDIA_REQUEST_IOC_REINIT, NULL);
-+    if (ret < 0) {
-+        av_log(avctx, AV_LOG_ERROR, "%s: reinit request %d failed, %s (%d)\n", __func__, req->request_fd, strerror(errno), errno);
-+        return -1;
-+    }
 +
 +    if (last_slice)
 +        return v4l2_request_set_drm_descriptor(req, &ctx->format);
@@ -47756,7 +47974,8 @@ index 0000000000..0c21860ba7
 +        goto fail;
 +    }
 +
-+    ctx->video_fd = open(path, O_RDWR | O_NONBLOCK, 0);
++//    ctx->video_fd = open(path, O_RDWR | O_NONBLOCK, 0);
++    ctx->video_fd = open(path, O_RDWR, 0);
 +    if (ctx->video_fd < 0) {
 +        av_log(avctx, AV_LOG_ERROR, "%s: opening %s failed, %s (%d)\n", __func__, path, strerror(errno), errno);
 +        ret = AVERROR(EINVAL);
@@ -48280,10 +48499,10 @@ index 0000000000..0c21860ba7
 +}
 diff --git a/libavcodec/v4l2_request.h b/libavcodec/v4l2_request.h
 new file mode 100644
-index 0000000000..72698f6f3c
+index 0000000000..be1e9111a6
 --- /dev/null
 +++ b/libavcodec/v4l2_request.h
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,92 @@
 +/*
 + * This file is part of FFmpeg.
 + *
@@ -48308,6 +48527,7 @@ index 0000000000..72698f6f3c
 +#include <linux/videodev2.h>
 +
 +#include "libavutil/hwcontext_drm.h"
++#include "v4l2_phase.h"
 +
 +typedef struct V4L2RequestContext {
 +    int video_fd;
@@ -48329,14 +48549,32 @@ index 0000000000..72698f6f3c
 +    struct v4l2_buffer buffer;
 +} V4L2RequestBuffer;
 +
++struct V4l2PhaseControl;
++
++typedef struct V4L2PhaseEnv {
++    struct V4L2PhaseEnv * next;
++    struct V4L2PhaseControl * ctrl;
++    unsigned int order;
++} V4L2PhaseEnv;
++
 +typedef struct V4L2RequestDescriptor {
 +    AVDRMFrameDescriptor drm;
 +    int request_fd;
 +    V4L2RequestBuffer output;
 +    V4L2RequestBuffer capture;
++
++    // Phase control
++    V4L2PhaseInfo phase;
 +} V4L2RequestDescriptor;
 +
 +uint64_t ff_v4l2_request_get_capture_timestamp(AVFrame *frame);
++
++// Sets phase control on this frame & gives it an order
++int ff_v4l2_request_start_phase_control(AVFrame *frame, struct V4L2PhaseControl * phase);
++
++// Had error - release all phases
++void ff_v4l2_request_abort_phase_control(AVFrame *frame);
++
 +
 +int ff_v4l2_request_reset_frame(AVCodecContext *avctx, AVFrame *frame);
 +
@@ -48813,10 +49051,10 @@ index 0000000000..13fac3f6f9
 +};
 diff --git a/libavcodec/v4l2_request_hevc.c b/libavcodec/v4l2_request_hevc.c
 new file mode 100644
-index 0000000000..43446c1488
+index 0000000000..58b018a56f
 --- /dev/null
 +++ b/libavcodec/v4l2_request_hevc.c
-@@ -0,0 +1,552 @@
+@@ -0,0 +1,587 @@
 +/*
 + * This file is part of FFmpeg.
 + *
@@ -48840,6 +49078,8 @@ index 0000000000..43446c1488
 +#include "v4l2_request.h"
 +#include "hevc-ctrls.h"
 +
++#include "v4l2_phase.h"
++
 +typedef struct V4L2RequestControlsHEVC {
 +    struct v4l2_ctrl_hevc_sps sps;
 +    struct v4l2_ctrl_hevc_pps pps;
@@ -48853,6 +49093,9 @@ index 0000000000..43446c1488
 +    V4L2RequestContext base;
 +    int decode_mode;
 +    int start_code;
++
++    unsigned int order;
++    V4L2PhaseControl * pctrl;
 +} V4L2RequestContextHEVC;
 +
 +static void v4l2_request_hevc_fill_pred_table(const HEVCContext *h, struct v4l2_hevc_pred_weight_table *table)
@@ -49124,6 +49367,8 @@ index 0000000000..43446c1488
 +                            sps->scaling_list_enable_flag ?
 +                            &sps->scaling_list : NULL;
 +    V4L2RequestControlsHEVC *controls = h->ref->hwaccel_picture_private;
++    V4L2RequestContextHEVC * const ctx = avctx->internal->hwaccel_priv_data;
++    int rv;
 +
 +    /* ISO/IEC 23008-2, ITU-T Rec. H.265: Sequence parameter set */
 +    controls->sps = make_v4l2_sps(sps);
@@ -49230,7 +49475,14 @@ index 0000000000..43446c1488
 +    controls->first_slice = 1;
 +    controls->num_slices = 0;
 +
-+    return ff_v4l2_request_reset_frame(avctx, h->ref->frame);
++    if ((rv = ff_v4l2_request_reset_frame(avctx, h->ref->frame)) != 0)
++        return rv;
++
++    ff_v4l2_request_start_phase_control(h->ref->frame, ctx->pctrl);
++
++    ff_thread_finish_setup(avctx); // Allow next thread to enter rpi_hevc_start_frame
++
++    return 0;
 +}
 +
 +static int v4l2_request_hevc_queue_decode(AVCodecContext *avctx, int last_slice)
@@ -49268,9 +49520,19 @@ index 0000000000..43446c1488
 +    return ff_v4l2_request_decode_frame(avctx, h->ref->frame, control, FF_ARRAY_ELEMS(control));
 +}
 +
++static void v4l2_request_hevc_abort_frame(AVCodecContext * const avctx) {
++    const HEVCContext *h = avctx->priv_data;
++
++    if (h->ref != NULL)
++        ff_v4l2_request_abort_phase_control(h->ref->frame);
++}
++
 +static int v4l2_request_hevc_end_frame(AVCodecContext *avctx)
 +{
-+    return v4l2_request_hevc_queue_decode(avctx, 1);
++    int rv = v4l2_request_hevc_queue_decode(avctx, 1);
++    if (rv < 0)
++        v4l2_request_hevc_abort_frame(avctx);
++    return rv;
 +}
 +
 +static int v4l2_request_hevc_decode_slice(AVCodecContext *avctx, const uint8_t *buffer, uint32_t size)
@@ -49332,10 +49594,18 @@ index 0000000000..43446c1488
 +    return ff_v4l2_request_set_controls(avctx, control, FF_ARRAY_ELEMS(control));
 +}
 +
++static int v4l2_request_hevc_uninit(AVCodecContext *avctx)
++{
++    V4L2RequestContextHEVC * const ctx = avctx->internal->hwaccel_priv_data;
++    ff_v4l2_phase_control_deletez(&ctx->pctrl);
++    return ff_v4l2_request_uninit(avctx);
++}
++
 +static int v4l2_request_hevc_init(AVCodecContext *avctx)
 +{
 +    int ret;
 +    const HEVCContext *h = avctx->priv_data;
++    V4L2RequestContextHEVC * const ctx = avctx->internal->hwaccel_priv_data;
 +
 +    struct v4l2_ctrl_hevc_sps sps = make_v4l2_sps(h->ps.sps);
 +
@@ -49346,6 +49616,8 @@ index 0000000000..43446c1488
 +            .size = sizeof(sps),
 +        },
 +    };
++
++    ctx->pctrl = ff_v4l2_phase_control_new(2);
 +
 +    ret = ff_v4l2_request_init(avctx, V4L2_PIX_FMT_HEVC_SLICE, 3 * 1024 * 1024, control, FF_ARRAY_ELEMS(control));
 +    if (ret)
@@ -49362,12 +49634,13 @@ index 0000000000..43446c1488
 +    .start_frame    = v4l2_request_hevc_start_frame,
 +    .decode_slice   = v4l2_request_hevc_decode_slice,
 +    .end_frame      = v4l2_request_hevc_end_frame,
++    .abort_frame    = v4l2_request_hevc_abort_frame,
 +    .frame_priv_data_size = sizeof(V4L2RequestControlsHEVC),
 +    .init           = v4l2_request_hevc_init,
-+    .uninit         = ff_v4l2_request_uninit,
++    .uninit         = v4l2_request_hevc_uninit,
 +    .priv_data_size = sizeof(V4L2RequestContextHEVC),
 +    .frame_params   = ff_v4l2_request_frame_params,
-+    .caps_internal  = HWACCEL_CAP_ASYNC_SAFE,
++    .caps_internal  = HWACCEL_CAP_ASYNC_SAFE | HWACCEL_CAP_MT_SAFE,
 +};
 diff --git a/libavcodec/v4l2_request_mpeg2.c b/libavcodec/v4l2_request_mpeg2.c
 new file mode 100644
