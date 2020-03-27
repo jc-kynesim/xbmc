@@ -42821,7 +42821,7 @@ index 0000000000..8777687021
 +#endif
 diff --git a/libavcodec/rpi_zc.c b/libavcodec/rpi_zc.c
 new file mode 100644
-index 0000000000..04af15159f
+index 0000000000..edd0412aa0
 --- /dev/null
 +++ b/libavcodec/rpi_zc.c
 @@ -0,0 +1,1214 @@
@@ -43325,7 +43325,7 @@ index 0000000000..04af15159f
 +            geo.bytes_per_pel = 1;
 +
 +            pthread_mutex_unlock(&sand_lock);
-+#if 0
++#if 1
 +            printf("Req: %dx%d: stride=%d/%d, height=%d/%d, stripes=%d, img.pitch=%d\n",
 +                   video_width, video_height,
 +                   geo.stride_y, geo.stride_c,
@@ -47465,7 +47465,7 @@ index 0000000000..392f22b988
 +#endif
 diff --git a/libavcodec/v4l2_request.c b/libavcodec/v4l2_request.c
 new file mode 100644
-index 0000000000..6e49b8ac81
+index 0000000000..56fafbb637
 --- /dev/null
 +++ b/libavcodec/v4l2_request.c
 @@ -0,0 +1,1028 @@
@@ -47633,8 +47633,8 @@ index 0000000000..6e49b8ac81
 +}
 +
 +const uint32_t v4l2_request_capture_pixelformats[] = {
-+    V4L2_PIX_FMT_SAND8,
-+    V4L2_PIX_FMT_SAND30,
++    V4L2_PIX_FMT_NV12_COL128,
++    V4L2_PIX_FMT_NV12_10_COL128,
 +    V4L2_PIX_FMT_NV12,
 +#ifdef DRM_FORMAT_MOD_ALLWINNER_TILED
 +    V4L2_PIX_FMT_SUNXI_TILED_NV12,
@@ -47652,11 +47652,11 @@ index 0000000000..6e49b8ac81
 +        layer->format = DRM_FORMAT_NV12;
 +        desc->objects[0].format_modifier = DRM_FORMAT_MOD_LINEAR;
 +        break;
-+    case V4L2_PIX_FMT_SAND8:
++    case V4L2_PIX_FMT_NV12_COL128:
 +        layer->format = DRM_FORMAT_NV12;
 +        desc->objects[0].format_modifier = DRM_FORMAT_MOD_BROADCOM_SAND128_COL_HEIGHT(format->fmt.pix.bytesperline);
 +        break;
-+    case V4L2_PIX_FMT_SAND30:
++    case V4L2_PIX_FMT_NV12_10_COL128:
 +        layer->format = DRM_FORMAT_P030;
 +        desc->objects[0].format_modifier = DRM_FORMAT_MOD_BROADCOM_SAND128_COL_HEIGHT(format->fmt.pix.bytesperline);
 +        break;
@@ -47681,13 +47681,13 @@ index 0000000000..6e49b8ac81
 +    layer->planes[0].offset = 0;
 +    layer->planes[0].pitch = V4L2_TYPE_IS_MULTIPLANAR(format->type) ? format->fmt.pix_mp.plane_fmt[0].bytesperline : format->fmt.pix.bytesperline;
 +
-+    if (pixelformat == V4L2_PIX_FMT_SAND8) {
++    if (pixelformat == V4L2_PIX_FMT_NV12_COL128) {
 +        layer->planes[1].object_index = 0;
 +        layer->planes[1].offset = format->fmt.pix.height * 128;
 +        layer->planes[0].pitch = format->fmt.pix.width;
 +        layer->planes[1].pitch = format->fmt.pix.width;
 +    }
-+    else if (pixelformat == V4L2_PIX_FMT_SAND30) {
++    else if (pixelformat == V4L2_PIX_FMT_NV12_10_COL128) {
 +        layer->planes[1].object_index = 0;
 +        layer->planes[1].offset = format->fmt.pix.height * 128;
 +        layer->planes[0].pitch = format->fmt.pix.width * 2; // Lies but it keeps DRM import happy
@@ -48466,10 +48466,10 @@ index 0000000000..6e49b8ac81
 +    } else {
 +        hwfc->width = ctx->format.fmt.pix.width;
 +        hwfc->height = ctx->format.fmt.pix.height;
-+        if (ctx->format.fmt.pix.pixelformat == V4L2_PIX_FMT_SAND8) {
++        if (ctx->format.fmt.pix.pixelformat == V4L2_PIX_FMT_NV12_COL128) {
 +            hwfc->sw_format = AV_PIX_FMT_RPI4_8;
 +        }
-+        else if (ctx->format.fmt.pix.pixelformat == V4L2_PIX_FMT_SAND30) {
++        else if (ctx->format.fmt.pix.pixelformat == V4L2_PIX_FMT_NV12_10_COL128) {
 +            hwfc->sw_format = AV_PIX_FMT_RPI4_10;
 +        }
 +    }
