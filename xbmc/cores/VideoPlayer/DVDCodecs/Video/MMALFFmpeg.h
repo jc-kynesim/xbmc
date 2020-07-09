@@ -53,15 +53,16 @@ public:
   virtual const std::string Name() override { return "mmal"; }
   virtual unsigned GetAllowedReferences() override;
   virtual long Release() override;
+  AVCodecContext *GetContext() { return m_avctx; }
 
   static void AlignedSize(AVCodecContext *avctx, int &width, int &height);
   static void FFReleaseBuffer(void *opaque, uint8_t *data);
-  static int FFGetBuffer(AVCodecContext *avctx, AVFrame *pic, int flags);
+  static AVBufferRef *FFGetBuffer(AVCodecContext *avctx, AVFrame *pic, int flags);
   static IHardwareDecoder* Create(CDVDStreamInfo &hint, CProcessInfo &processInfo, AVPixelFormat fmt);
   static void Register();
-
 protected:
   AVCodecContext *m_avctx;
+  AVCodecContext *m_otherctx;
   CProcessInfo &m_processInfo;
   CCriticalSection m_section;
   std::shared_ptr<CMMALPool> m_pool;
