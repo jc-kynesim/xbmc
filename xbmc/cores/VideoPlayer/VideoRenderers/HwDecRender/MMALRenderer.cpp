@@ -31,6 +31,7 @@
 
 extern "C" {
 #include <libavutil/imgutils.h>
+#include <libavcodec/rpi_zc.h>
 }
 
 #define VERBOSE 0
@@ -252,6 +253,18 @@ void CMMALPool::Configure(AVPixelFormat format, int width, int height, int align
   CLog::Log(LOGDEBUG, "%s::%s pool:%p %dx%d (%dx%d) pix:%d size:%d fmt:%.4s", CLASSNAME, __func__,
             static_cast<void*>(m_mmal_pool), width, height, alignedWidth, alignedHeight, format, size,
             (char*)&m_mmal_format);
+}
+
+void CMMALPool::Configure(const size_t size, const struct AVRpiZcFrameGeometry& av_geo)
+{
+  CSingleLock lock(m_critSection);
+  m_mmal_format = TranslateFormat((AVPixelFormat)av_geo.format);
+  m_width = av_geo.video_width;
+  m_height = av_geo.video_height;
+  m_size = (int)size;
+  m_geo = CRpiZcFrameGeometry(av_geo);
+  m_software = true;
+  m_configured = true;
 }
 
 void CMMALPool::Configure(AVPixelFormat format, int size)

@@ -19,6 +19,10 @@
 struct MMAL_BUFFER_HEADER_T;
 class CGPUMEM;
 
+extern "C" {
+struct AVRpiZcFrameGeometry;
+}
+
 namespace MMAL {
 
 class CDecoder;
@@ -56,8 +60,6 @@ public:
   AVCodecContext *GetContext() { return m_avctx; }
 
   static void AlignedSize(AVCodecContext *avctx, int &width, int &height);
-  static void FFReleaseBuffer(void *opaque, uint8_t *data);
-  static AVBufferRef *FFGetBuffer(AVCodecContext *avctx, AVFrame *pic, int flags);
   static IHardwareDecoder* Create(CDVDStreamInfo &hint, CProcessInfo &processInfo, AVPixelFormat fmt);
   static void Register();
 protected:
@@ -69,6 +71,8 @@ protected:
   enum AVPixelFormat m_fmt;
   CDVDStreamInfo m_hints;
   CMMALYUVBuffer *m_renderBuffer = nullptr;
+private:
+  static AVBufferRef * zc_alloc_buf(void * v, size_t size, const struct AVRpiZcFrameGeometry * geo);
 };
 
 };

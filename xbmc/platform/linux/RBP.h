@@ -25,7 +25,9 @@
 #include "threads/Event.h"
 #include "utils/CPUInfo.h"
 
-class AVRpiZcFrameGeometry
+struct AVRpiZcFrameGeometry;
+
+class CRpiZcFrameGeometry
 {
 public:
   unsigned int getStrideY() { return stride_y; }
@@ -47,6 +49,10 @@ public:
   void setStripes(unsigned int v) { stripes = v; }
   void setBitsPerPixel(unsigned int v) { bits_per_pixel = v; }
   void setBytesPerPixel(unsigned int v) { bits_per_pixel = v * 8; }
+
+  CRpiZcFrameGeometry() = default;
+  CRpiZcFrameGeometry(const CRpiZcFrameGeometry& geo) = default;
+  CRpiZcFrameGeometry(const struct AVRpiZcFrameGeometry& av_geo);
 private:
   unsigned int stride_y = 0;
   unsigned int height_y = 0;
@@ -97,7 +103,7 @@ public:
   uint32_t WaitVsync(uint32_t target = ~0U);
   void VSyncCallback();
   int GetMBox() { return m_mb; }
-  AVRpiZcFrameGeometry GetFrameGeometry(uint32_t encoding, unsigned short video_width, unsigned short video_height);
+  CRpiZcFrameGeometry GetFrameGeometry(uint32_t encoding, unsigned short video_width, unsigned short video_height);
 
 private:
   DllBcmHost *m_DllBcmHost;

@@ -19,9 +19,7 @@
 
 extern "C" {
 #include <libavutil/imgutils.h>
-#define AVRpiZcFrameGeometry AVRpiZcFrameGeometryX
 #include <libavcodec/rpi_zc.h>
-#undef AVRpiZcFrameGeometry
 }
 
 using namespace MMAL;
@@ -58,7 +56,7 @@ void CMMALYUVBuffer::GetPlanes(uint8_t*(&planes)[YuvImage::MAX_PLANES])
 
   std::shared_ptr<CMMALPool> pool = std::dynamic_pointer_cast<CMMALPool>(m_pool);
   assert(pool);
-  AVRpiZcFrameGeometry geo = pool->GetGeometry();
+  CRpiZcFrameGeometry geo = pool->GetGeometry();
 
   if (VERBOSE)
     CLog::Log(LOGDEBUG, LOGVIDEO, "%s::%s %dx%d %dx%d (%dx%d %dx%d)", CLASSNAME, __FUNCTION__, geo.getStrideY(), geo.getHeightY(), geo.getStrideC(), geo.getHeightC(), Width(), Height(), AlignedWidth(), AlignedHeight());
@@ -76,7 +74,7 @@ void CMMALYUVBuffer::GetStrides(int(&strides)[YuvImage::MAX_PLANES])
     strides[i] = 0;
   std::shared_ptr<CMMALPool> pool = std::dynamic_pointer_cast<CMMALPool>(m_pool);
   assert(pool);
-  AVRpiZcFrameGeometry geo = pool->GetGeometry();
+  CRpiZcFrameGeometry geo = pool->GetGeometry();
   strides[0] = geo.getStrideY();
   strides[1] = geo.getStrideC();
   strides[2] = geo.getStrideC();
@@ -172,44 +170,34 @@ long CDecoder::Release()
   return IHardwareDecoder::Release();
 }
 
-void CDecoder::FFReleaseBuffer(void *opaque, uint8_t *data)
-{
-  CGPUMEM *gmem = (CGPUMEM *)opaque;
-  CMMALYUVBuffer *YUVBuffer = (CMMALYUVBuffer *)gmem->m_opaque;
-  CLog::Log(LOGDEBUG, LOGVIDEO, "%s::%s buf:%p gmem:%p", CLASSNAME, __FUNCTION__,
-            static_cast<void*>(YUVBuffer), static_cast<void*>(gmem));
-
-  YUVBuffer->Release();
-}
-
-
 static void cma_avbuf_pool_free(void * v)
 {
-  CDecoder::FFReleaseBuffer(v, nullptr);
+  CMMALYUVBuffer *YUVBuffer = (CMMALYUVBuffer *)v;
+  YUVBuffer->Release();
 }
 
 static unsigned int zc_buf_vcsm_handle(void * v)
 {
-  CGPUMEM *gmem = (CGPUMEM *)v;
-  return gmem->m_vcsm_handle;
+  CMMALYUVBuffer *YUVBuffer = (CMMALYUVBuffer *)v;
+  return YUVBuffer->GetMem()->m_vcsm_handle;
 }
 
 static unsigned int zc_buf_vc_handle(void * v)
 {
-  CGPUMEM *gmem = (CGPUMEM *)v;
-  return gmem->m_vc_handle;
+  CMMALYUVBuffer *YUVBuffer = (CMMALYUVBuffer *)v;
+  return YUVBuffer->GetMem()->m_vc_handle;
 }
 
 static void * zc_buf_map_arm(void * v)
 {
-  CGPUMEM *gmem = (CGPUMEM *)v;
-  return gmem->m_arm;
+  CMMALYUVBuffer *YUVBuffer = (CMMALYUVBuffer *)v;
+  return YUVBuffer->GetMem()->m_arm;
 }
 
 static unsigned int zc_buf_map_vc(void * v)
 {
-  CGPUMEM *gmem = (CGPUMEM *)v;
-  return gmem->m_vc;
+  CMMALYUVBuffer *YUVBuffer = (CMMALYUVBuffer *)v;
+  return YUVBuffer->GetMem()->m_vc;
 }
 
 static const av_rpi_zc_buf_fn_tab_t zc_buf_fn_tab = {
@@ -220,58 +208,23 @@ static const av_rpi_zc_buf_fn_tab_t zc_buf_fn_tab = {
     .map_vc = zc_buf_map_vc
 };
 
-static AVBufferRef *
-zc_alloc_buf(void * v, size_t size, const AVRpiZcFrameGeometryX * geo)
+AVBufferRef *
+CDecoder::zc_alloc_buf(void * v, size_t size, const AVRpiZcFrameGeometry * geo)
 {
-  CLog::Log(LOGINFO, "%s::%s - v:%x", CLASSNAME, __FUNCTION__, (uint32_t)v);
-  CDecoder *dec = reinterpret_cast<CDecoder*>(v);
-  AVFrame frame = {};
-  frame.width = geo->video_width;
-  frame.height = geo->video_height;
-  frame.format = geo->format;
-  return dec->FFGetBuffer(dec->GetContext(), &frame, 0);
-}
-
-AVBufferRef *CDecoder::FFGetBuffer(AVCodecContext *avctx, AVFrame *frame, int flags)
-{
-  ICallbackHWAccel* cb = static_cast<ICallbackHWAccel*>(avctx->opaque);
-  CDecoder* dec = static_cast<CDecoder*>(cb->GetHWAccel());
-  CLog::Log(LOGDEBUG, LOGVIDEO, "%s::%s %dx%d format:%x:%x flags:%x", CLASSNAME, __FUNCTION__, frame->width, frame->height, frame->format, dec->m_fmt, flags);
-
-  if ((avctx->codec && (avctx->codec->capabilities & AV_CODEC_CAP_DR1) == 0) || frame->format != dec->m_fmt)
-  {
-    return nullptr;
-    assert(0);
-  }
+  CDecoder * const dec = reinterpret_cast<CDecoder*>(v);
 
   std::shared_ptr<CMMALPool> pool = std::dynamic_pointer_cast<CMMALPool>(dec->m_pool);
   if (!pool->IsConfigured())
-  {
-    int aligned_width = frame->width;
-    int aligned_height = frame->height;
-    if (pool->Encoding() != MMAL_ENCODING_YUVUV128 && pool->Encoding() != MMAL_ENCODING_YUVUV64_16)
-    {
-      // ffmpeg requirements
-      AlignedSize(dec->m_avctx, aligned_width, aligned_height);
-      // GPU requirements
-      aligned_width = ALIGN_UP(aligned_width, 32);
-      aligned_height = ALIGN_UP(aligned_height, 16);
-    }
-    pool->Configure(dec->m_fmt, frame->width, frame->height, aligned_width, aligned_height, 0);
-  }
+    pool->Configure(size, *geo);
+
   CMMALYUVBuffer *YUVBuffer = dynamic_cast<CMMALYUVBuffer *>(pool->Get());
   if (!YUVBuffer)
   {
     CLog::Log(LOGERROR,"%s::%s Failed to allocated buffer in time", CLASSNAME, __FUNCTION__);
     return nullptr;
   }
-  assert(YUVBuffer->mmal_buffer);
 
-  CGPUMEM *gmem = YUVBuffer->GetMem();
-  assert(gmem);
-
-  //AVBufferRef *buf = av_buffer_create((uint8_t *)gmem->m_arm, gmem->m_numbytes, CDecoder::FFReleaseBuffer, gmem, AV_BUFFER_FLAG_READONLY);
-  AVBufferRef *const buf = av_rpi_zc_buf(gmem->m_numbytes, 0, (void *)gmem, &zc_buf_fn_tab);
+  AVBufferRef *const buf = av_rpi_zc_buf(size, 0, (void *)YUVBuffer, &zc_buf_fn_tab);
 
   if (!buf)
   {
@@ -279,26 +232,6 @@ AVBufferRef *CDecoder::FFGetBuffer(AVCodecContext *avctx, AVFrame *frame, int fl
     YUVBuffer->Release();
     return nullptr;
   }
-
-  uint8_t *planes[YuvImage::MAX_PLANES];
-  int strides[YuvImage::MAX_PLANES];
-  YUVBuffer->GetPlanes(planes);
-  YUVBuffer->GetStrides(strides);
-
-  for (int i = 0; i < AV_NUM_DATA_POINTERS; i++)
-  {
-    frame->data[i] = i < YuvImage::MAX_PLANES ? planes[i] : nullptr;
-    frame->linesize[i] = i < YuvImage::MAX_PLANES ? strides[i] : 0;
-    frame->buf[i] = i == 0 ? buf : nullptr;
-  }
-
-  frame->extended_data = frame->data;
-  // Leave extended buf alone
-
-  CLog::Log(LOGDEBUG, LOGVIDEO, "%s::%s buf:%p mmal:%p gmem:%p avbuf:%p:%p:%p", CLASSNAME,
-            __FUNCTION__, static_cast<void*>(YUVBuffer), static_cast<void*>(YUVBuffer->mmal_buffer),
-            static_cast<void*>(gmem), static_cast<void*>(frame->data[0]),
-            static_cast<void*>(frame->data[1]), static_cast<void*>(frame->data[2]));
 
   return buf;
 }
@@ -319,11 +252,12 @@ bool CDecoder::Open(AVCodecContext *avctx, AVCodecContext* mainctx, enum AVPixel
 
 
   m_avctx = mainctx;
-  int s = av_rpi_zc_init2(m_avctx, (void *)this, zc_alloc_buf, zc_free_pool);
+  int s;
+  s = av_rpi_zc_init2(m_avctx, (void *)this, zc_alloc_buf, zc_free_pool);
   assert(s == 0);
-  //m_otherctx = avctx;
-  //int s = av_rpi_zc_init2(m_otherctx, (void *)this, zc_alloc_buf, zc_free_pool);
-  //assert(s == 0);
+  m_otherctx = avctx;
+  s = av_rpi_zc_init2(m_otherctx, (void *)this, zc_alloc_buf, zc_free_pool);
+  assert(s == 0);
 
   m_fmt = fmt;
 
@@ -369,13 +303,14 @@ CDVDVideoCodec::VCReturn CDecoder::Decode(AVCodecContext* avctx, AVFrame* frame)
     if (m_renderBuffer)
       m_renderBuffer->Release();
 
-    CGPUMEM *m_gmem = (CGPUMEM *)av_rpi_zc_buf_v(frame->buf[0]);
+    m_renderBuffer = static_cast<CMMALYUVBuffer*>(av_rpi_zc_buf_v(frame->buf[0]));
+    assert(m_renderBuffer && m_renderBuffer->mmal_buffer);
+
+    CGPUMEM *m_gmem = m_renderBuffer->GetMem();
     assert(m_gmem);
     // need to flush ARM cache so GPU can see it (HEVC will have already done this)
     if (avctx->codec_id != AV_CODEC_ID_HEVC)
       m_gmem->Flush();
-    m_renderBuffer = static_cast<CMMALYUVBuffer*>(m_gmem->m_opaque);
-    assert(m_renderBuffer && m_renderBuffer->mmal_buffer);
     if (m_renderBuffer)
     {
       m_renderBuffer->m_stills = m_hints.stills;

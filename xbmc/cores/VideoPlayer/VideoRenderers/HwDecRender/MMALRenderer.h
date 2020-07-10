@@ -29,6 +29,10 @@
 struct VideoPicture;
 class CProcessInfo;
 
+extern "C" {
+struct AVRpiZcFrameGeometry;
+}
+
 namespace MMAL {
 
 class CMMALBuffer;
@@ -53,6 +57,7 @@ public:
   void Prime();
   void SetProcessInfo(CProcessInfo *processInfo) { m_processInfo = processInfo; }
   void Configure(AVPixelFormat format, int width, int height, int alignedWidth, int alignedHeight, int size);
+  void Configure(const size_t size, const struct AVRpiZcFrameGeometry& av_geo);
   bool IsSoftware() { return m_software; }
   void SetVideoDeintMethod(std::string method);
   static uint32_t TranslateFormat(AVPixelFormat pixfmt);
@@ -63,7 +68,7 @@ public:
   virtual int BitsPerPixel() { return m_geo.getBitsPerPixel(); }
   virtual uint32_t &Encoding() { return m_mmal_format; }
   virtual int Size() { return m_size; }
-  AVRpiZcFrameGeometry &GetGeometry() { return m_geo; }
+  CRpiZcFrameGeometry &GetGeometry() { return m_geo; }
   virtual void Released(CVideoBufferManager &videoBufferManager);
 
 protected:
@@ -84,7 +89,7 @@ protected:
   bool m_input;
   MMAL_POOL_T *m_mmal_pool;
   MMAL_COMPONENT_T *m_component;
-  AVRpiZcFrameGeometry m_geo;
+  CRpiZcFrameGeometry m_geo;
   struct MMALEncodingTable
   {
     AVPixelFormat pixfmt;

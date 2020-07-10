@@ -16,6 +16,11 @@
 #include "utils/TimeUtils.h"
 #include "utils/log.h"
 
+extern "C" {
+#include <libavutil/pixfmt.h>
+#include <libavcodec/rpi_zc.h>
+}
+
 #include <assert.h>
 
 #include <interface/mmal/mmal.h>
@@ -62,6 +67,37 @@ struct VC_IMAGE_T {
    uint8_t                         _dummy[3];      /* pad struct to 64 bytes */
 };
 typedef int vc_image_t_size_check[(sizeof(VC_IMAGE_T) == 64) * 2 - 1];
+
+// AVRpiZcGeo really should contain this info
+static int ff_format_bits(const int fmt)
+{
+  switch ((enum AVPixelFormat)fmt)
+  {
+    case AV_PIX_FMT_YUV420P10:
+    case AV_PIX_FMT_RPI4_10:
+    case AV_PIX_FMT_SAND64_10:
+      return 10;
+    case AV_PIX_FMT_SAND128:
+    case AV_PIX_FMT_RPI4_8:
+    case AV_PIX_FMT_YUV420P:
+      return 8;
+    default:
+      break;
+  }
+  return 0;
+}
+
+CRpiZcFrameGeometry::CRpiZcFrameGeometry(const AVRpiZcFrameGeometry& av_geo) :
+  stride_y(av_geo.stride_y),
+  height_y(av_geo.height_y),
+  stride_c(av_geo.stride_c),
+  height_c(av_geo.height_c),
+  planes_c(av_geo.planes_c),
+  stripes(av_geo.stripes),
+  bits_per_pixel(ff_format_bits(av_geo.format))
+{
+}
+
 
 CRBP::CRBP()
 {
@@ -410,9 +446,9 @@ void CGPUMEM::Flush()
   vcsm_clean_invalid( &iocache );
 }
 
-AVRpiZcFrameGeometry CRBP::GetFrameGeometry(uint32_t encoding, unsigned short video_width, unsigned short video_height)
+CRpiZcFrameGeometry CRBP::GetFrameGeometry(uint32_t encoding, unsigned short video_width, unsigned short video_height)
 {
-  AVRpiZcFrameGeometry geo;
+  CRpiZcFrameGeometry geo;
   geo.setStripes(1);
   geo.setBitsPerPixel(8);
 
@@ -492,3 +528,6 @@ AVRpiZcFrameGeometry CRBP::GetFrameGeometry(uint32_t encoding, unsigned short vi
   }
   return geo;
 }
+
+
+

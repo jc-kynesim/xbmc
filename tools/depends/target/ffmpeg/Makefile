@@ -26,7 +26,7 @@ ffmpg_config += --enable-libdav1d
 ffmpg_config += $(FFMPEG_CONFIGURE_OPTIONS)
 
 ifeq ($(CROSS_COMPILING), yes)
-  ffmpg_config += --arch=$(CPU) --enable-cross-compile
+  ffmpg_config += --arch=armv6t2 --enable-cross-compile
 endif
 ifeq ($(OS), linux)
   ffmpg_config += --target-os=$(OS)

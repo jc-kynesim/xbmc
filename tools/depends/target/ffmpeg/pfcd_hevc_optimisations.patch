@@ -16158,19 +16158,6 @@ index f421dc909f..66b001e333 100644
  
  #define HW_CONFIG_ENCODER(device, frames, ad_hoc, format, device_type_) \
      &(const AVCodecHWConfigInternal) { \
-diff --git a/libavcodec/internal.h b/libavcodec/internal.h
-index 0a72a0e372..a010a81ee8 100644
---- a/libavcodec/internal.h
-+++ b/libavcodec/internal.h
-@@ -196,6 +196,8 @@ typedef struct AVCodecInternal {
-     int initial_sample_rate;
-     int initial_channels;
-     uint64_t initial_channel_layout;
-+
-+    void * zc_env;
- } AVCodecInternal;
- 
- struct AVCodecDefault {
 diff --git a/libavcodec/mmaldec.c b/libavcodec/mmaldec.c
 index 547bece576..bfd1083c16 100644
 --- a/libavcodec/mmaldec.c
@@ -42830,10 +42817,10 @@ index 0000000000..8777687021
 +#endif
 diff --git a/libavcodec/rpi_zc.c b/libavcodec/rpi_zc.c
 new file mode 100644
-index 0000000000..98d338adef
+index 0000000000..d0f9254961
 --- /dev/null
 +++ b/libavcodec/rpi_zc.c
-@@ -0,0 +1,1228 @@
+@@ -0,0 +1,1234 @@
 +#include "config.h"
 +
 +#include "avcodec.h"
@@ -43852,9 +43839,11 @@ index 0000000000..98d338adef
 +    zc->pool_size = pool_size;
 +}
 +
-+unsigned int av_rpi_zc_get_decoder_pool_size(ZcEnv *const zc)
++// Used by user code - do not require ZcEnv
++unsigned int av_rpi_zc_decoder_pool_size(const struct AVCodecContext * const s)
 +{
-+    return zc->pool_size;
++    const ZcEnv * const zc = av_rpi_zc_env_ptr(s);
++    return zc == NULL ? 0 : zc->pool_size;
 +}
 +
 +int av_rpi_zc_get_buffer(ZcEnv *const zc, AVFrame * const frame)
@@ -43982,10 +43971,13 @@ index 0000000000..98d338adef
 +
 +#define RPI_GET_BUFFER2 1
 +
++AVZcEnvPtr av_rpi_zc_env_ptr(const struct AVCodecContext * const s)
++{
++    return s->zc_env;
++}
 +
 +static int zc_get_buffer2(struct AVCodecContext *s, AVFrame *frame, int flags)
 +{
-+av_log(NULL, AV_LOG_ERROR, "%s: s=%p e=%p g=%p\n", __func__, (void *)s, (void *)s->zc_env, (void *)s->get_buffer2 );
 +#if !RPI_GET_BUFFER2
 +    return avcodec_default_get_buffer2(s, frame, flags);
 +#else
@@ -43999,7 +43991,7 @@ index 0000000000..98d338adef
 +    else if (frame->format == AV_PIX_FMT_YUV420P ||
 +             av_rpi_is_sand_frame(frame))
 +    {
-+        if ((rv = av_rpi_zc_get_buffer(s->zc_env, frame)) == 0)
++        if ((rv = av_rpi_zc_get_buffer(av_rpi_zc_env_ptr(s), frame)) == 0)
 +            rv = av_rpi_zc_resolve_frame(frame, ZC_RESOLVE_ALLOC_VALID);
 +    }
 +    else
@@ -44019,6 +44011,9 @@ index 0000000000..98d338adef
 +#endif
 +}
 +
++// Abstract this so that if we use zc_env externally we get it from a
++// consistent place.
++// Beware direct copy in pthread_frame.c:update-content_from_user
 +int av_rpi_zc_in_use(const struct AVCodecContext * const s)
 +{
 +    return s->get_buffer2 == zc_get_buffer2;
@@ -44044,15 +44039,13 @@ index 0000000000..98d338adef
 +    s->zc_env = zc;
 +    s->get_buffer2 = zc_get_buffer2;
 +    s->thread_safe_callbacks = 1;
-+av_log(NULL, AV_LOG_ERROR, "%s: s=%p e=%p g=%p\n", __func__, (void *)s, (void *)s->zc_env, (void *)s->get_buffer2 );
 +    return 0;
 +}
 +
 +void av_rpi_zc_uninit2(struct AVCodecContext * const s)
 +{
-+    ZcEnv * const zc = s->zc_env;
++    ZcEnv * const zc = av_rpi_zc_env_ptr(s);
 +
-+av_log(NULL, AV_LOG_ERROR, "%s: s=%p e=%p g=%p\n", __func__, (void *)s, (void *)s->zc_env, (void *)s->get_buffer2 );
 +    av_assert0(av_rpi_zc_in_use(s));
 +
 +    s->get_buffer2 = zc->old.get_buffer2;
@@ -44064,10 +44057,10 @@ index 0000000000..98d338adef
 +
 diff --git a/libavcodec/rpi_zc.h b/libavcodec/rpi_zc.h
 new file mode 100644
-index 0000000000..f00a7c962c
+index 0000000000..4dbbbbde72
 --- /dev/null
 +++ b/libavcodec/rpi_zc.h
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,230 @@
 +/*
 +Copyright (c) 2018 Raspberry Pi (Trading) Ltd.
 +All rights reserved.
@@ -44225,7 +44218,8 @@ index 0000000000..f00a7c962c
 +// Get minimum pool size in frames - valid by the time the first alloc request
 +// occurs.  Takes into account thread requests and DPB sizes derived from SPS
 +// rather than just adding a worst case DPB size.
-+unsigned int av_rpi_zc_get_decoder_pool_size(const AVZcEnvPtr zc);
++// Returns 0 if unknown
++unsigned int av_rpi_zc_decoder_pool_size(const struct AVCodecContext * const s);
 +
 +typedef struct av_rpi_zc_buf_fn_tab_s {
 +    // This AVBuffer is being freed by ffmpeg - return memory
@@ -44265,6 +44259,7 @@ index 0000000000..f00a7c962c
 +void av_rpi_zc_int_env_freep(AVZcEnvPtr * zc);
 +AVZcEnvPtr av_rpi_zc_int_env_alloc(void * const logctx);
 +void av_rpi_zc_set_decoder_pool_size(const AVZcEnvPtr zc, const unsigned int pool_size);
++AVZcEnvPtr av_rpi_zc_env_ptr(const struct AVCodecContext * const s);
 +
 +// Test to see if the context is using zc (checks get_buffer2)
 +int av_rpi_zc_in_use(const struct AVCodecContext * const s);
@@ -44446,7 +44441,7 @@ index 0000000000..9b7b6536a4
 +#endif
 diff --git a/libavcodec/rpivid_hevc.c b/libavcodec/rpivid_hevc.c
 new file mode 100644
-index 0000000000..7b4862e916
+index 0000000000..594241d584
 --- /dev/null
 +++ b/libavcodec/rpivid_hevc.c
 @@ -0,0 +1,2033 @@
@@ -46229,7 +46224,7 @@ index 0000000000..7b4862e916
 +
 +    if (av_rpi_zc_in_use(avctx))
 +    {
-+        const AVZcEnvPtr zc = avctx->zc_env;
++        const AVZcEnvPtr zc = av_rpi_zc_env_ptr(avctx);
 +        av_rpi_zc_set_decoder_pool_size(zc, pool_req);
 +        av_rpi_zc_get_buffer(zc, frame);   // get_buffer2 would alloc
 +    }
@@ -52421,7 +52416,7 @@ index 32cbde82eb..9ba8b7b2dd 100644
      map = av_frame_alloc();
      if (!map)
 diff --git a/libavutil/pixdesc.c b/libavutil/pixdesc.c
-index 9d61c52567..4e36a110c1 100644
+index 9d61c52567..db0453de1e 100644
 --- a/libavutil/pixdesc.c
 +++ b/libavutil/pixdesc.c
 @@ -2073,6 +2073,18 @@ static const AVPixFmtDescriptor av_pix_fmt_descriptors[AV_PIX_FMT_NB] = {
@@ -52433,11 +52428,11 @@ index 9d61c52567..4e36a110c1 100644
 +        .flags = AV_PIX_FMT_FLAG_HWACCEL,
 +    },
 +    [AV_PIX_FMT_RPI4_10] = {
-+        .name = "rpi",
++        .name = "rpi4_10",
 +        .flags = AV_PIX_FMT_FLAG_HWACCEL,
 +    },
 +    [AV_PIX_FMT_RPI4_8] = {
-+        .name = "rpi",
++        .name = "rpi4_8",
 +        .flags = AV_PIX_FMT_FLAG_HWACCEL,
 +    },
      [AV_PIX_FMT_AYUV64LE] = {
@@ -53865,11 +53860,11 @@ index 0000000000..fc14f2a3c2
 +1,WPP_F_ericsson_MAIN10_2,WPP_F_ericsson_MAIN10_2.bit,WPP_F_ericsson_MAIN10_yuv.md5
 +1,WPP_F_ericsson_MAIN_2,WPP_F_ericsson_MAIN_2.bit,WPP_F_ericsson_MAIN_2_yuv.md5
 diff --git a/pi-util/conf_native.sh b/pi-util/conf_native.sh
-new file mode 100644
-index 0000000000..285bc1b99c
+new file mode 100755
+index 0000000000..3bee337a76
 --- /dev/null
 +++ b/pi-util/conf_native.sh
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,47 @@
 +echo "Configure for native build"
 +
 +RPI_OPT_VC=/opt/vc
@@ -53882,6 +53877,14 @@ index 0000000000..285bc1b99c
 +USR_PREFIX=`pwd`/install
 +LIB_PREFIX=$USR_PREFIX/lib/arm-linux-gnueabihf
 +INC_PREFIX=$USR_PREFIX/include/arm-linux-gnueabihf
++
++SHARED_LIBS="--enable-shared"
++if [ "$1" == "--noshared" ]; then
++  SHARED_LIBS="--disable-shared"
++  echo Static libs
++else
++  echo Shared libs
++fi
 +
 +./configure \
 + --prefix=$USR_PREFIX\
@@ -53897,26 +53900,24 @@ index 0000000000..285bc1b99c
 + --enable-libdrm\
 + --enable-libudev\
 + --enable-vout-drm\
++ $SHARED_LIBS\
 + --extra-cflags="-ggdb $RPI_KEEPS $RPI_DEFINES $RPI_INCLUDES"\
 + --extra-cxxflags="$RPI_DEFINES $RPI_INCLUDES"\
 + --extra-ldflags="$RPI_LIBDIRS"\
 + --extra-libs="-Wl,--start-group -lbcm_host -lmmal -lmmal_util -lmmal_core -lvcos -lvcsm -lvchostif -lvchiq_arm"\
 +
-+# --enable-shared\
-+
 +# --enable-decoder=hevc_rpi\
 +# --enable-extra-warnings\
 +# --arch=armv71\
-+# --enable-shared\
 +
 +# gcc option for getting asm listing
 +# -Wa,-ahls
 diff --git a/pi-util/conf_pi1.sh b/pi-util/conf_pi1.sh
 new file mode 100755
-index 0000000000..400e7adcbf
+index 0000000000..29fa9fa68d
 --- /dev/null
 +++ b/pi-util/conf_pi1.sh
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,39 @@
 +echo "Configure for Pi1"
 +
 +RPI_TOOLROOT=`pwd`/../tools/arm-bcm2708/arm-rpi-4.9.3-linux-gnueabihf
@@ -53927,6 +53928,14 @@ index 0000000000..400e7adcbf
 +#RPI_KEEPS="-save-temps=obj"
 +RPI_KEEPS=""
 +
++SHARED_LIBS="--enable-shared"
++if [ "$1" == "--noshared" ]; then
++  SHARED_LIBS="--disable-shared"
++  echo Static libs
++else
++  echo Shared libs
++fi
++
 +./configure --enable-cross-compile\
 + --cpu=arm1176jzf-s\
 + --arch=arm\
@@ -53934,7 +53943,7 @@ index 0000000000..400e7adcbf
 + --target-os=linux\
 + --disable-stripping\
 + --enable-mmal\
-+ --enable-shared\
++ $SHARED_LIBS\
 + --extra-cflags="-g $RPI_KEEPS $RPI_INCLUDES"\
 + --extra-cxxflags="$RPI_INCLUDES"\
 + --extra-ldflags="$RPI_LIBDIRS -Wl,-rpath=/opt/vc/lib,-rpath-link=$RPI_OPT_VC/lib,-rpath=/lib,-rpath=/usr/lib,-rpath-link=$RPI_TOOLROOT/lib,-rpath-link=$RPI_TOOLROOT/lib"\
@@ -53950,10 +53959,10 @@ index 0000000000..400e7adcbf
 +# -Wa,-ahls
 diff --git a/pi-util/conf_pi2.sh b/pi-util/conf_pi2.sh
 new file mode 100755
-index 0000000000..e44c6857eb
+index 0000000000..3dd5edcf83
 --- /dev/null
 +++ b/pi-util/conf_pi2.sh
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,50 @@
 +echo "Configure for Pi2/3"
 +
 +RPI_TOOLROOT=`pwd`/../tools/arm-bcm2708/arm-rpi-4.9.3-linux-gnueabihf
@@ -53969,6 +53978,14 @@ index 0000000000..e44c6857eb
 +LIB_PREFIX=$USR_PREFIX/lib/arm-linux-gnueabihf
 +INC_PREFIX=$USR_PREFIX/include/arm-linux-gnueabihf
 +
++SHARED_LIBS="--enable-shared"
++if [ "$1" == "--noshared" ]; then
++  SHARED_LIBS="--disable-shared"
++  echo Static libs
++else
++  echo Shared libs
++fi
++
 +./configure --enable-cross-compile\
 + --prefix=$USR_PREFIX\
 + --libdir=$LIB_PREFIX\
@@ -53980,6 +53997,7 @@ index 0000000000..e44c6857eb
 + --disable-thumb\
 + --enable-mmal\
 + --enable-rpi\
++ $SHARED_LIBS\
 + --extra-cflags="-ggdb $RPI_KEEPS $RPI_DEFINES $RPI_INCLUDES"\
 + --extra-cxxflags="$RPI_DEFINES $RPI_INCLUDES"\
 + --extra-ldflags="$RPI_LIBDIRS -Wl,-rpath=/opt/vc/lib,-rpath-link=$RPI_OPT_VC/lib,-rpath=/lib,-rpath=/usr/lib,-rpath-link=$RPI_TOOLROOT/lib,-rpath-link=$RPI_TOOLROOT/lib"\
@@ -54351,7 +54369,7 @@ index 0000000000..2fabe98c32
 +    exit(main())
 +
 diff --git a/pi-util/genpatch.sh b/pi-util/genpatch.sh
-new file mode 100644
+new file mode 100755
 index 0000000000..0948a68a7a
 --- /dev/null
 +++ b/pi-util/genpatch.sh

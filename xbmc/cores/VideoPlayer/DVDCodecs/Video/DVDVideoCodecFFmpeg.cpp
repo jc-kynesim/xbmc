@@ -338,7 +338,17 @@ bool CDVDVideoCodecFFmpeg::Open(CDVDStreamInfo &hints, CDVDCodecOptions &options
   m_processInfo.SetSwDeinterlacingMethods();
   m_processInfo.SetVideoInterlaced(false);
 
+#if 1
+  if (hints.codec != AV_CODEC_ID_HEVC)
+    pCodec = avcodec_find_decoder(hints.codec);
+  else
+  {
+    // ** Pi3 ONLY check!
+    pCodec = avcodec_find_decoder_by_name("hevc_rpi");
+  }
+#else
   pCodec = avcodec_find_decoder(hints.codec);
+#endif
 
   if(pCodec == NULL)
   {
